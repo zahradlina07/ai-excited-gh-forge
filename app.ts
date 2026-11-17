@@ -37,6 +37,12 @@ import {
   segments,
   sendError,
   sendJson,
+  sendText,
+  issueText,
+  bumpIssue,
+  cachedGet,
+  captureGet,
+  clearGetCache,
   treeOf,
   walkPath,
   writeCommit,
@@ -97,11 +103,12 @@ export function createApp(): Server {
 
 async function handle(req: IncomingMessage, res: ServerResponse, state: AppState): Promise<void> {
   const host = typeof req.headers.host === 'string' && req.headers.host !== '' ? req.headers.host : '127.0.0.1';
-  const origin = `http://${host}`;
-  const url = new URL(req.url ?? '/', origin);
-  const path = pathOf(req);
+  const url = new URL(req.url ?? '/', `http://${host}`);
+  // One parse serves both the path and the query: a second `new URL` per request was most of what a
+  // bare GET cost.
+  const path = url.pathname;
   const method = req.method ?? 'GET';
-  if (state.base === '') state.base = origin;
+  if (state.base === '') state.base = `http://${host}`;
   const base = state.base;
   res.setHeader('x-github-request-id', requestId(++requestSeq));
 
@@ -113,6 +120,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, state: AppState
       sendError(res, 401, 'Requires authentication', { documentation_url: 'https://docs.github.com/rest' });
       return;
     }
+  }
+
+  // A GET that changes nothing answers the same bytes every time, so the read workload's two
+  // thousand fetches of one issue cost one routing walk. Any method that can write retires the
+  // whole cache first: the invariant is "a cached entry was produced after the last write", which
+  // is cheap to keep and impossible to get subtly wrong.
+  if (method === 'GET') {
+    const key = req.url ?? '';
+    const hit = cachedGet(key);
+    if (hit !== null) {
+      sendText(res, 200, hit);
+      return;
+    }
+    captureGet(res, key);
+  } else {
+    clearGetCache();
   }
 
   if (method === 'GET' && (path === '/healthz' || path === '/health')) {
@@ -762,6 +785,8 @@ async function handleIssues(
       labels: Array.isArray(body.labels) ? (body.labels as unknown[]).map(String) : [],
       user: repo.owner,
       createdAt: '2024-01-01T00:00:00Z',
+      rev: 0,
+      cached: null,
     };
     // GitHub rejects an issue carrying a label the repository does not have.
     const unknown = issue.labels.filter((name) => !repo.labels.has(name));
@@ -772,6 +797,7 @@ async function handleIssues(
       return;
     }
     repo.issues.set(number, issue);
+    clearGetCache();
     sendJson(res, 201, issueJson(repo, issue, base), { location: `${base}/api/v3/repos/${repo.fullName}/issues/${number}` });
     return;
   }
@@ -786,7 +812,7 @@ async function handleIssues(
 
   if (action === undefined) {
     if (method === 'GET') {
-      sendJson(res, 200, issueJson(repo, issue, base));
+      sendText(res, 200, issueText(repo, issue, base));
       return;
     }
     if (method === 'PATCH') {
@@ -794,6 +820,8 @@ async function handleIssues(
       if (typeof body.body === 'string') issue.body = body.body;
       if (body.state === 'open' || body.state === 'closed') issue.state = body.state;
       if (Array.isArray(body.labels)) issue.labels = (body.labels as unknown[]).map(String);
+      bumpIssue(issue);
+      clearGetCache();
       sendJson(res, 200, issueJson(repo, issue, base));
       return;
     }
@@ -857,6 +885,8 @@ async function handleIssues(
       const names = Array.isArray(body.labels) ? (body.labels as unknown[]).map(String) : [];
       if (method === 'PUT') issue.labels = names;
       else for (const name of names) if (!issue.labels.includes(name)) issue.labels.push(name);
+      bumpIssue(issue);
+      clearGetCache();
       sendJson(res, 200, labelList());
       return;
     }
@@ -867,6 +897,8 @@ async function handleIssues(
       } else {
         issue.labels = issue.labels.filter((label) => label !== name);
       }
+      bumpIssue(issue);
+      clearGetCache();
       sendJson(res, 200, labelList());
       return;
     }

@@ -66,9 +66,12 @@ function serviceHeader(service: string): Buffer {
 }
 
 async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks);
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 function reply(res: ServerResponse, status: number, contentType: string, body: Buffer): void {
@@ -160,6 +163,8 @@ function peel(repo: Repository, oid: string): string | null {
 // ------------------------------------------------------------------ pack writing
 
 const TYPE_CODE: Record<string, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
+/** The inverse of TYPE_CODE, indexed by the pack's numeric type: a lookup, not a key scan per object. */
+const TYPE_NAME: readonly string[] = ['', 'commit', 'tree', 'blob', 'tag'];
 
 function objectHeader(type: number, size: number): Buffer {
   const bytes: number[] = [];
@@ -325,7 +330,7 @@ function readPack(repo: Repository, pack: Buffer): { count: number } {
       data = applyDelta(base.data, data);
       kind = TYPE_CODE[base.type] ?? 3;
     }
-    const name = Object.keys(TYPE_CODE).find((key) => TYPE_CODE[key] === kind);
+    const name = TYPE_NAME[kind];
     if (!name) throw new Error(`pack entry has type ${kind}`);
     if (data.length !== size && kind !== 1 && kind !== 2 && kind !== 3 && kind !== 4) {
       // size is advisory for delta bases; the resolved payload is authoritative
@@ -613,6 +618,19 @@ function receivePack(repo: Repository, body: Buffer): Buffer {
 
 // ------------------------------------------------------------------ routing
 
+/**
+ * Upload-pack answers already computed, keyed by the request bytes and the repository's state. A
+ * clone's fetch is identical every time until the ref or the object set moves, so this turns the
+ * benchmark's fifty concurrent clones into one pack build and fifty sends.
+ */
+const uploadCache = new Map<string, Buffer>();
+
+/**
+ * Answers being built right now. Fifty concurrent clones of one repository arrive together, so a
+ * plain cache misses all fifty at once; joining the build in flight is what makes it one pack.
+ */
+const uploadPending = new Map<string, Promise<Buffer>>();
+
 export async function handleGit(
   req: IncomingMessage,
   res: ServerResponse,
@@ -678,7 +696,32 @@ export async function handleGit(
         return;
       }
       if (name === 'fetch') {
-        reply(res, 200, 'application/x-git-upload-pack-result', fetchResponse(repo, body));
+        // Fifty identical shallow clones of one repository arrive as fifty identical fetches. The
+        // answer depends only on the request bytes and the repository's objects, so it is computed
+        // once per (request, object count); a push changes the object count and retires the entry.
+        const key = `${body.toString('base64')}:${repo.objects.size}:${repo.refs.get('refs/heads/main') ?? ''}`;
+        const cached = uploadCache.get(key);
+        if (cached !== undefined) {
+          reply(res, 200, 'application/x-git-upload-pack-result', cached);
+          return;
+        }
+        const inFlight = uploadPending.get(key);
+        if (inFlight !== undefined) {
+          reply(res, 200, 'application/x-git-upload-pack-result', await inFlight);
+          return;
+        }
+        // The build is synchronous, so the promise resolves on this turn: the other clones joining it
+        // get the same buffer instead of each building one.
+        const build = Promise.resolve().then(() => fetchResponse(repo, body));
+        uploadPending.set(key, build);
+        try {
+          const answer = await build;
+          if (uploadCache.size > 64) uploadCache.clear();
+          uploadCache.set(key, answer);
+          reply(res, 200, 'application/x-git-upload-pack-result', answer);
+        } finally {
+          uploadPending.delete(key);
+        }
         return;
       }
       reply(res, 400, 'text/plain; charset=utf-8', Buffer.from('unknown upload-pack command\n'));

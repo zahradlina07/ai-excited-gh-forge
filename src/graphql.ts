@@ -662,6 +662,8 @@ function mutate(name: string, args: Record<string, unknown>, ctx: ExecCtx): unkn
       labels: [],
       user: ctx.viewer,
       createdAt: '2024-01-01T00:00:00Z',
+      rev: 0,
+      cached: null,
     };
     repo.issues.set(numberValue, issue);
     return node('CreateIssuePayload', { repo, issue });
@@ -694,6 +696,8 @@ function mutate(name: string, args: Record<string, unknown>, ctx: ExecCtx): unkn
       user: ctx.viewer,
       createdAt: '2024-01-01T00:00:00Z',
       mergeCommitSha: null as string | null,
+      baseShaAtCreate: null as string | null,
+      headShaAtCreate: null as string | null,
     };
     repo.pulls.set(numberValue, pull);
     return node('CreatePullRequestPayload', { repo, pull });

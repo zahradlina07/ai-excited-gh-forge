@@ -34,6 +34,10 @@ export interface Issue {
   labels: string[];
   readonly user: string;
   readonly createdAt: string;
+  /** Bumped whenever any field above changes, so a serialised body can be cached safely. */
+  rev: number;
+  /** The last serialised REST body for this issue, with the `rev` and `base` it was made for. */
+  cached: { readonly text: string; readonly rev: number; readonly base: string } | null;
 }
 
 export interface Comment {

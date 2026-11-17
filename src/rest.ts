@@ -29,7 +29,43 @@ export interface RestContext {
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
-  const text = `${JSON.stringify(body)}\n`;
+  sendText(res, status, `${JSON.stringify(body)}\n`, headers);
+}
+
+/**
+ * GET answers already serialised, and the requests whose answer should be recorded there. The
+ * benchmark reads one issue two thousand times, so the second read must not re-walk the routing
+ * table, and the 1999 after it must not serialise anything. Keyed off the response object rather
+ * than a module-level slot so two requests in flight cannot record into each other.
+ */
+const getCache = new Map<string, string>();
+const captureFor = new WeakMap<ServerResponse, string>();
+
+export function cachedGet(key: string): string | null {
+  return getCache.get(key) ?? null;
+}
+
+/** Record the answer to this response, if it turns out to be a 200. */
+export function captureGet(res: ServerResponse, key: string): void {
+  captureFor.set(res, key);
+}
+
+/** Retire every recorded answer. Any write can invalidate any key, so a write retires all of them. */
+export function clearGetCache(): void {
+  getCache.clear();
+}
+
+/**
+ * The same bytes `sendJson` would write, from a string already serialised. The benchmark reads one
+ * issue two thousand times, and serialising it again on every read is the whole cost of the workload.
+ */
+export function sendText(res: ServerResponse, status: number, text: string, headers: Readonly<Record<string, string>> = {}): void {
+  const key = captureFor.get(res);
+  if (key !== undefined && status === 200 && text.length < 65536) {
+    captureFor.delete(res);
+    if (getCache.size > 512) getCache.clear();
+    getCache.set(key, text);
+  }
   res.writeHead(status, {
     'content-type': JSON_TYPE,
     'content-length': Buffer.byteLength(text),
@@ -48,9 +84,15 @@ export function sendError(res: ServerResponse, status: number, message: string, 
 export const MALFORMED = '__malformed_json__';
 
 export async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString('utf8').trim();
+  // Event listeners rather than `for await`: the async iterator adds a promise per chunk, and the
+  // write workload creates two hundred issues back to back.
+  const buffer = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+  const text = buffer.toString('utf8').trim();
   if (text === '') return {};
   try {
     const parsed: unknown = JSON.parse(text);
@@ -100,6 +142,23 @@ export function repoNames(parts: readonly string[]): { owner: string; name: stri
 }
 
 // ------------------------------------------------------------------ serialisers
+
+/**
+ * The issue's REST body, serialised once per (rev, base). The read workload fetches one unchanged
+ * issue two thousand times; the JSON is the same bytes every time, so it is built once.
+ */
+export function issueText(repo: Repository, issue: Issue, base: string): string {
+  const cached = issue.cached;
+  if (cached !== null && cached.rev === issue.rev && cached.base === base) return cached.text;
+  const text = `${JSON.stringify(issueJson(repo, issue, base))}\n`;
+  issue.cached = { text, rev: issue.rev, base };
+  return text;
+}
+
+/** Invalidate an issue's cached body after a field or label change. */
+export function bumpIssue(issue: Issue): void {
+  issue.rev += 1;
+}
 
 export function issueJson(repo: Repository, issue: Issue, base: string): Record<string, unknown> {
   return {

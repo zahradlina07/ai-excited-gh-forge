@@ -233,6 +233,8 @@ function runTool(name: string, args: Record<string, unknown>, ctx: { state: McpS
       labels: [],
       user: viewer,
       createdAt: '2024-01-01T00:00:00Z',
+      rev: 0,
+      cached: null,
     });
     return ok(issueJson(repo, numberValue, state));
   }
