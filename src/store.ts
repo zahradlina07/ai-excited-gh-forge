@@ -220,8 +220,24 @@ export function commitPayload(opts: {
 }
 
 /** Parse a tree payload back into its entries, for the REST contents API. */
+/**
+ * Parsed trees and commits, keyed by the buffer they were parsed from. Object data never changes
+ * once stored, so a second parse of the same buffer can only produce the same answer; the push
+ * workload walks two hundred commits of growing history and re-parsed every one of them per push.
+ */
+const treeCache = new WeakMap<Buffer, TreeEntry[]>();
+const commitCache = new WeakMap<Buffer, ReturnType<typeof parseCommitUncached>>();
+
 export function parseTree(data: Buffer): TreeEntry[] {
+  const hit = treeCache.get(data);
+  if (hit !== undefined) return hit;
   const entries: TreeEntry[] = [];
+  const parsed = parseTreeUncached(data, entries);
+  treeCache.set(data, parsed);
+  return parsed;
+}
+
+function parseTreeUncached(data: Buffer, entries: TreeEntry[]): TreeEntry[] {
   let offset = 0;
   while (offset < data.length) {
     const space = data.indexOf(0x20, offset);
@@ -239,6 +255,20 @@ export function parseTree(data: Buffer): TreeEntry[] {
 
 /** Parse a commit payload into the fields the REST and GraphQL views report. */
 export function parseCommit(data: Buffer): {
+  tree: string;
+  parents: string[];
+  author: { name: string; email: string; time: number; tz: string };
+  committer: { name: string; email: string; time: number; tz: string };
+  message: string;
+} {
+  const hit = commitCache.get(data);
+  if (hit !== undefined) return hit;
+  const parsed = parseCommitUncached(data);
+  commitCache.set(data, parsed);
+  return parsed;
+}
+
+function parseCommitUncached(data: Buffer): {
   tree: string;
   parents: string[];
   author: { name: string; email: string; time: number; tz: string };

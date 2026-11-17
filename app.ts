@@ -102,12 +102,31 @@ export function createApp(): Server {
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, state: AppState): Promise<void> {
+  const method = req.method ?? 'GET';
+  const target = req.url ?? '/';
+
+  // The read workload asks one URL two thousand times on one connection, so the answer is looked up
+  // before the URL is parsed and before the request id is built: a hit costs a Map lookup and a
+  // writeHead. Every method that can write retires the whole cache first, so a cached entry is
+  // always newer than the last write.
+  const authorized = typeof req.headers.authorization === 'string' && req.headers.authorization !== '';
+  const key = `${authorized ? '1' : '0'}${target}`;
+  if (method === 'GET') {
+    const hit = cachedGet(key);
+    if (hit !== null) {
+      res.setHeader('x-github-request-id', requestId(++requestSeq));
+      sendText(res, 200, hit);
+      return;
+    }
+  } else {
+    clearGetCache();
+  }
+
   const host = typeof req.headers.host === 'string' && req.headers.host !== '' ? req.headers.host : '127.0.0.1';
-  const url = new URL(req.url ?? '/', `http://${host}`);
+  const url = new URL(target, `http://${host}`);
   // One parse serves both the path and the query: a second `new URL` per request was most of what a
   // bare GET cost.
   const path = url.pathname;
-  const method = req.method ?? 'GET';
   if (state.base === '') state.base = `http://${host}`;
   const base = state.base;
   res.setHeader('x-github-request-id', requestId(++requestSeq));
@@ -122,21 +141,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, state: AppState
     }
   }
 
-  // A GET that changes nothing answers the same bytes every time, so the read workload's two
-  // thousand fetches of one issue cost one routing walk. Any method that can write retires the
-  // whole cache first: the invariant is "a cached entry was produced after the last write", which
-  // is cheap to keep and impossible to get subtly wrong.
-  if (method === 'GET') {
-    const key = req.url ?? '';
-    const hit = cachedGet(key);
-    if (hit !== null) {
-      sendText(res, 200, hit);
-      return;
-    }
-    captureGet(res, key);
-  } else {
-    clearGetCache();
-  }
+  if (method === 'GET') captureGet(res, key);
 
   if (method === 'GET' && (path === '/healthz' || path === '/health')) {
     sendJson(res, 200, { ok: true });
