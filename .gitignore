@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+*.tmp
+_probe*.cjs
+_probe*.mjs
+_scen.mjs
