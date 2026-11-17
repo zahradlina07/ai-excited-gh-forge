@@ -94,6 +94,16 @@ function idText(text: string): number {
 export function createApp(): Server {
   const state: AppState = { repos: new Map(), base: '', token: DEFAULT_TOKEN };
   return createServer((req: IncomingMessage, res: ServerResponse) => {
+    // The read workload's hot path, taken before any `async` function is entered: a hit costs one
+    // Map lookup, one writeHead and one end, with no promise, no URL parse and no per-request state.
+    if (req.method === 'GET') {
+      const authorized = typeof req.headers.authorization === 'string' && req.headers.authorization !== '';
+      const hit = cachedGet(`${authorized ? '1' : '0'}${req.url ?? '/'}`);
+      if (hit !== null) {
+        sendCached(res, hit, requestId(++requestSeq));
+        return;
+      }
+    }
     void handle(req, res, state).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) sendError(res, 500, message);
@@ -115,8 +125,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, state: AppState
   if (method === 'GET') {
     const hit = cachedGet(key);
     if (hit !== null) {
-      res.setHeader('x-github-request-id', requestId(++requestSeq));
-      sendCached(res, hit);
+      sendCached(res, hit, requestId(++requestSeq));
       return;
     }
   } else {

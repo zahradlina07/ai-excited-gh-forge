@@ -51,11 +51,16 @@ export function cachedGet(key: string): Cached | null {
   return getCache.get(key) ?? null;
 }
 
-/** Answer a recorded GET: two array reads and one `end`, with nothing encoded per request. */
-export function sendCached(res: ServerResponse, hit: Cached): void {
+/** Answer a recorded GET: one `writeHead` with a literal header array and one `end`. */
+export function sendCached(res: ServerResponse, hit: Cached, requestId: string): void {
   // A raw header block is written as given: Node skips the per-call iteration, lower-casing and
   // validation it performs for a header object, which is the whole per-request cost at this speed.
-  res.writeHead(200, ['content-type', JSON_TYPE, 'content-length', hit.length, 'x-github-media-type', 'github.v3']);
+  res.writeHead(200, [
+    'content-type', JSON_TYPE,
+    'content-length', hit.length,
+    'x-github-media-type', 'github.v3',
+    'x-github-request-id', requestId,
+  ]);
   res.end(hit.body);
 }
 
