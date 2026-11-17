@@ -38,11 +38,25 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
  * table, and the 1999 after it must not serialise anything. Keyed off the response object rather
  * than a module-level slot so two requests in flight cannot record into each other.
  */
-const getCache = new Map<string, string>();
+/** A body already encoded, with its length and header block prepared once. */
+interface Cached {
+  readonly body: Buffer;
+  readonly length: string;
+}
+
+const getCache = new Map<string, Cached>();
 const captureFor = new WeakMap<ServerResponse, string>();
 
-export function cachedGet(key: string): string | null {
+export function cachedGet(key: string): Cached | null {
   return getCache.get(key) ?? null;
+}
+
+/** Answer a recorded GET: two array reads and one `end`, with nothing encoded per request. */
+export function sendCached(res: ServerResponse, hit: Cached): void {
+  // A raw header block is written as given: Node skips the per-call iteration, lower-casing and
+  // validation it performs for a header object, which is the whole per-request cost at this speed.
+  res.writeHead(200, ['content-type', JSON_TYPE, 'content-length', hit.length, 'x-github-media-type', 'github.v3']);
+  res.end(hit.body);
 }
 
 /** Record the answer to this response, if it turns out to be a 200. */
@@ -64,7 +78,7 @@ export function sendText(res: ServerResponse, status: number, text: string, head
   if (key !== undefined && status === 200 && text.length < 65536) {
     captureFor.delete(res);
     if (getCache.size > 512) getCache.clear();
-    getCache.set(key, text);
+    getCache.set(key, { body: Buffer.from(text, 'utf8'), length: String(Buffer.byteLength(text)) });
   }
   res.writeHead(status, {
     'content-type': JSON_TYPE,

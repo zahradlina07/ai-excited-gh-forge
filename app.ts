@@ -43,6 +43,7 @@ import {
   cachedGet,
   captureGet,
   clearGetCache,
+  sendCached,
   treeOf,
   walkPath,
   writeCommit,
@@ -115,7 +116,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, state: AppState
     const hit = cachedGet(key);
     if (hit !== null) {
       res.setHeader('x-github-request-id', requestId(++requestSeq));
-      sendText(res, 200, hit);
+      sendCached(res, hit);
       return;
     }
   } else {
